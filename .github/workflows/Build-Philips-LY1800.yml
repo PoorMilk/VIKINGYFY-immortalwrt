@@ -45,12 +45,10 @@ jobs:
       - name: Setup Compiler Cache
         uses: actions/cache@v4
         with:
-          path: |
-            dl
-            ~/.ccache
-          key: ${{ runner.os }}-ipq60xx-${{ hashFiles('feeds.conf.default') }}
+          path: ~/.ccache
+          key: ${{ runner.os }}-ipq60xx-ccache-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-ipq60xx-
+            ${{ runner.os }}-ipq60xx-ccache-
 
       - name: Update Feeds and Configure Seed
         run: |
@@ -119,7 +117,6 @@ jobs:
             [ -n "$id" ] && gh api -X DELETE repos/${{ github.repository }}/releases/$id || true
             [ -n "$tag" ] && gh api -X DELETE repos/${{ github.repository }}/git/refs/tags/$tag || true
           done
-
           gh run list --repo "${{ github.repository }}" --limit 100 --json databaseId \
             --jq '.[5:] | .[].databaseId' | while read -r run_id; do
               [ -n "$run_id" ] && gh run delete "$run_id" --repo "${{ github.repository }}" || true
