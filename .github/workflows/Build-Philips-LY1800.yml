@@ -1,0 +1,123 @@
+name: Build Philips LY1800
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 4'
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Free Disk Space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/.ghcup /usr/share/swift \
+            /usr/local/lib/node_modules /usr/local/share/powershell /usr/local/share/chromium
+          sudo docker image prune -a -f || true
+          sudo apt-get clean
+
+      - name: Install Toolchain Dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y build-essential clang flex bison \
+            gsettings-desktop-schemas python3-setuptools libglib2.0-dev \
+            libgmp3-dev libmpc-dev libmpfr-dev libssl-dev libtool \
+            python3-pyelftools python3-yaml subversion uglifyjs git \
+            asciidoc xmlto gettext xsltproc libz-dev rsync ccache \
+            zlib1g-dev gawk unzip libncurses-dev gcc-multilib \
+            g++-multilib file wget python3-ply
+          sudo timedatectl set-timezone "${{ env.TZ }}"
+
+      - name: Setup Compiler Cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ${{ runner.os }}-ipq60xx-ccache-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-ipq60xx-ccache-
+
+      - name: Update Feeds and Configure Seed
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          cat << 'EOF' > .config
+          CONFIG_TARGET_qualcommax=y
+          CONFIG_TARGET_qualcommax_ipq60xx=y
+          CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_philips_ly1800=y
+          CONFIG_PACKAGE_luci-app-autoreboot=y
+          CONFIG_PACKAGE_luci-app-cpufreq=y
+          CONFIG_PACKAGE_luci-app-ddns-go=y
+          CONFIG_PACKAGE_luci-app-homeproxy=y
+          CONFIG_PACKAGE_luci-app-openclash=y
+          CONFIG_PACKAGE_luci-app-ttyd=y
+          # CONFIG_TARGET_ROOTFS_INITRAMFS is not set
+          CONFIG_CCACHE=y
+          CONFIG_TARGET_ROOTFS_SQUASHFS=y
+          EOF
+          make defconfig
+
+      - name: Download Packages
+        run: |
+          make download -j8
+          find dl -size -1024c -exec rm -f {} \;
+
+      - name: Compile Firmware
+        run: make -j$(nproc) || make -j1 V=s
+
+      - name: Stage Artifacts
+        run: |
+          mkdir -p release
+          TARGET_DIR="bin/targets/qualcommax/ipq60xx"
+          FACTORY_FILE=$(find "$TARGET_DIR" -name "*philips_ly1800*factory.bin" | head -n 1)
+          SYSUPGRADE_FILE=$(find "$TARGET_DIR" -name "*philips_ly1800*sysupgrade.bin" | head -n 1)
+          [ -n "$FACTORY_FILE" ] && cp -f "$FACTORY_FILE" release/ly1800-factory.bin
+          [ -n "$SYSUPGRADE_FILE" ] && cp -f "$SYSUPGRADE_FILE" release/ly1800-sysupgrade.bin
+          cd release
+          [ "$(ls -A .)" ] || exit 1
+          echo "TAG_NAME=Philips_LY1800-$(date +'%Y%m%d%H%M')" >> $GITHUB_ENV
+          echo "RELEASE_NAME=Philips LY1800 ImmortalWrt $(date +'%Y-%m-%d %H:%M')" >> $GITHUB_ENV
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Philips_LY1800_${{ env.TAG_NAME }}
+          path: release/*
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          tag_name: ${{ env.TAG_NAME }}
+          name: ${{ env.RELEASE_NAME }}
+          make_latest: true
+          generate_release_notes: false
+
+      - name: Purge Historical Artifacts and Runs
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --paginate repos/${{ github.repository }}/releases \
+            --jq 'sort_by(.created_at) | reverse | .[5:] | .[]? | "\(.id) \(.tag_name)"' | \
+          while read -r id tag; do
+            [ -n "$id" ] && gh api -X DELETE repos/${{ github.repository }}/releases/$id || true
+            [ -n "$tag" ] && gh api -X DELETE repos/${{ github.repository }}/git/refs/tags/$tag || true
+          done
+          gh run list --repo "${{ github.repository }}" --limit 100 --json databaseId \
+            --jq '.[5:] | .[].databaseId' | while read -r run_id; do
+              [ -n "$run_id" ] && gh run delete "$run_id" --repo "${{ github.repository }}" || true
+            done
